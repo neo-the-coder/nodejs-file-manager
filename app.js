@@ -1,20 +1,24 @@
-import fs from 'fs/promises';
-import { statSync, createReadStream, createWriteStream } from 'node:fs';
-import path from 'path';
-import os from 'os';
+import fs from "fs/promises";
+import {
+  statSync,
+  createReadStream,
+  createWriteStream,
+} from "node:fs";
+import path from "path";
+import os from "os";
 import { createHash } from "node:crypto";
-import { createBrotliCompress, createBrotliDecompress } from 'zlib';
+import { createBrotliCompress, createBrotliDecompress } from "zlib";
+import { pipeline } from "stream/promises";
 
-// Command line arguments
-const arg = process.argv.slice(2).find(arg => arg.startsWith('--username'));
-const username = arg ? arg.split('=')[1]: 'Guest';
+// Get Username
+const arg = process.argv.slice(2).find((arg) => arg.startsWith("--username"));
+const username = arg ? arg.split("=")[1] : "Guest";
 
 // Display welcome message
 console.log(`Welcome to the File Manager, ${username}!`);
 
-// TODO: prevent ^C printing
 // Handle Ctrl+C
-process.on('SIGINT', () => {
+process.on("SIGINT", () => {
   console.log(`\nThank you for using File Manager, ${username}, goodbye!`);
   process.exit();
 });
@@ -26,8 +30,8 @@ let currentDirectory = os.homedir();
 const pcd = () => console.log(`You are currently in ${currentDirectory}`);
 pcd();
 
-// List of operations
-const operations = {
+// List of commands
+const commands = {
   up: () => {
     const parentDirectory = path.resolve(currentDirectory, "..");
     //   parentDirectory !== path.parse(parentDirectory).root)
@@ -48,85 +52,122 @@ const operations = {
       console.log("Operation failed");
     }
   },
-  ls: async () => {
+  ls: async (filePath) => {
     try {
-        const files = await fs.readdir(currentDirectory);
+      const files = await fs.readdir(
+        path.join(currentDirectory, filePath ?? "")
+      );
 
-        const dfolders = [];
-        const dfiles = []
+      const dfolders = [];
+      const dfiles = [];
 
-        for( const file of files) {
-            if (statSync(path.join(currentDirectory, file)).isDirectory()) {
-                dfolders.push({Name: file, Type: 'directory'});
-            } else {
-                dfiles.push({Name: file, Type: 'file'});
-            }
+      for (const file of files) {
+        if (
+          statSync(
+            path.join(currentDirectory, filePath ?? "", file)
+          ).isDirectory()
+        ) {
+          dfolders.push({ Name: file, Type: "directory" });
+        } else {
+          dfiles.push({ Name: file, Type: "file" });
         }
-        dfolders.sort((a,b) => a.Name - b.Name);
-        dfiles.sort((a,b) => a.Name - b.Name);
-        console.table([...dfolders, ...dfiles]);
+      }
+      dfolders.sort((a, b) => a.Name - b.Name);
+      dfiles.sort((a, b) => a.Name - b.Name);
+      const result = [...dfolders, ...dfiles];
+
+      if (result.length > 0) {
+        console.table(result);
+      } else {
+        console.log("Empty directory");
+      }
     } catch (error) {
-        console.log("Operation failed");
+      console.log("Operation failed");
     }
   },
-  cat: (filePath) => {
-    createReadStream(path.join(currentDirectory, filePath))
-      .on("data", (chunk) => process.stdout.write(chunk))
-      .on("end", () => console.log("\n"))
-      .on("error", (err) => console.log("Operation failed.", err));
-  },
-  add: (fileName) => {
-    fs.writeFile(path.join(currentDirectory, fileName), "", (err) => {
-      if (err) {
-        console.log("Operation failed.");
+  cat: async (filePath) => {
+    try {
+      const readStream = createReadStream(
+        path.join(currentDirectory, filePath)
+      );
+
+      for await (const chunk of readStream) {
+        console.log("\n" + chunk.toString() + "\n");
       }
-    });
+    } catch (err) {
+      console.error("Operation failed");
+    }
   },
-  rn: (oldPath, newName) => {
-    const newPath = path.join(currentDirectory, newName);
-    fs.rename(oldPath, newPath, (err) => {
-      if (err) {
-        console.log("Operation failed.");
+  add: async (fileName) => {
+    try {
+      const fd = await fs.open(path.join(currentDirectory, fileName), "wx");
+      await fd.close();
+    } catch (err) {
+      console.log("Operation failed");
+    }
+  },
+  rn: async (oldPath, newName) => {
+    try {
+      const oldDest = path.join(currentDirectory, oldPath);
+      const newDest = path.join(currentDirectory, newName);
+      await fs.rename(oldDest, newDest);
+    } catch (err) {
+      console.log("Operation failed");
+    }
+  },
+  cp: async (source, destination) => {
+    try {
+      const sourcePath = path.join(currentDirectory, source);
+      let destinationPath = path.join(currentDirectory, destination);
+
+      // Stop operation if source is a folder or destination is file
+      if (
+        statSync(sourcePath).isDirectory() ||
+        !statSync(destinationPath).isDirectory()
+      ) {
+        throw Error;
       }
-    });
+
+      destinationPath = path.join(destinationPath, path.basename(source));
+
+      const readStream = createReadStream(sourcePath);
+      const writeStream = createWriteStream(destinationPath);
+
+      await pipeline(readStream, writeStream);
+    } catch {
+      console.log("Operation failed");
+    }
   },
-  cp: (source, destination) => {
-    const sourcePath = path.join(currentDirectory, source);
-    const destinationPath = path.join(currentDirectory, destination);
+  mv: async (source, destination) => {
+    try {
+      const sourcePath = path.join(currentDirectory, source);
+      let destinationPath = path.join(currentDirectory, destination);
 
-    const readStream = createReadStream(sourcePath);
-    const writeStream = createWriteStream(destinationPath);
-
-    readStream.pipe(writeStream);
-
-    readStream.on("error", () => console.log("Operation failed."));
-    writeStream.on("error", () => console.log("Operation failed."));
-  },
-  mv: (source, destination) => {
-    const sourcePath = path.join(currentDirectory, source);
-    const destinationPath = path.join(currentDirectory, destination);
-
-    const readStream = createReadStream(sourcePath);
-    const writeStream = createWriteStream(destinationPath);
-
-    readStream.pipe(writeStream);
-
-    readStream.on("error", () => console.log("Operation failed."));
-    writeStream.on("error", () => console.log("Operation failed."));
-    writeStream.on("finish", () => {
-      fs.unlink(sourcePath, (err) => {
-        if (err) {
-          console.log("Operation failed.");
-        }
-      });
-    });
-  },
-  rm: (filePath) => {
-    fs.unlink(path.join(currentDirectory, filePath), (err) => {
-      if (err) {
-        console.log("Operation failed.");
+      // Stop operation if source is a folder or destination is file
+      if (
+        statSync(sourcePath).isDirectory() ||
+        !statSync(destinationPath).isDirectory()
+      ) {
+        throw Error;
       }
-    });
+
+      destinationPath = path.join(destinationPath, path.basename(source));
+
+      const readStream = createReadStream(sourcePath);
+      const writeStream = createWriteStream(destinationPath);
+
+      await pipeline(readStream, writeStream);
+      await fs.unlink(sourcePath);
+    } catch (err) {
+      console.log("Operation failed");
+    }
+  },
+  rm: async (filePath) => {
+    try {
+      await fs.unlink(path.join(currentDirectory, filePath));
+    } catch (err) {
+      console.log("Operation failed");
+    }
   },
   os: (param) => {
     switch (param) {
@@ -134,7 +175,14 @@ const operations = {
         console.log(JSON.stringify(os.EOL));
         break;
       case "--cpus":
-        console.log(os.cpus())
+        console.table(
+          os
+            .cpus()
+            .map((cpu) => ({
+              Model: cpu.model,
+              Speed: (cpu.speed / 1000).toFixed(1) + " GHz",
+            }))
+        );
         break;
       case "--homedir":
         console.log(os.homedir());
@@ -146,64 +194,72 @@ const operations = {
         console.log(os.arch());
         break;
       default:
-        console.log("Invalid input.");
+        console.log("Invalid input");
     }
   },
-  hash: (filePath) => {
-    const hash = createHash("sha256");
-    const stream = createReadStream(path.join(currentDirectory, filePath));
+  hash: async (filePath) => {
+    try {
+      const hash = createHash("sha256");
+      const readStream = createReadStream(
+        path.join(currentDirectory, filePath)
+      );
 
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", () =>
-      console.log(`Hash for ${filePath}:\n${hash.digest("hex")}`)
-    );
-    stream.on("error", () => console.log("Operation failed."));
+      for await (const chunk of readStream) {
+        hash.update(chunk);
+      }
+      console.log(hash.digest("hex"));
+    } catch (err) {
+      console.error("Operation failed");
+    }
   },
-  compress: (filePath, destinationPath) => {
-    const readStream = createReadStream(path.join(currentDirectory, filePath));
-    const writeStream = createWriteStream(path.join(currentDirectory,destinationPath));
-    const compressStream = createBrotliCompress();
+  compress: async (filePath, destinationPath) => {
+    try {
+      const readStream = createReadStream(
+        path.join(currentDirectory, filePath)
+      );
+      const writeStream = createWriteStream(
+        path.join(currentDirectory, destinationPath)
+      );
+      const compressStream = createBrotliCompress();
 
-    readStream.pipe(compressStream).pipe(writeStream);
-
-    readStream.on("error", () => console.log("Operation failed."));
-    writeStream.on("error", () => console.log("Operation failed."));
+      await pipeline(readStream, compressStream, writeStream);
+    } catch (err) {
+      console.log("Operation failed.");
+    }
   },
-  decompress: (filePath, destinationPath) => {
-    const readStream = createReadStream(path.join(currentDirectory,filePath));
-    const writeStream = createWriteStream(path.join(currentDirectory,destinationPath));
-    const decompressStream = createBrotliDecompress();
+  decompress: async (filePath, destinationPath) => {
+    try {
+      const readStream = createReadStream(
+        path.join(currentDirectory, filePath)
+      );
+      const writeStream = createWriteStream(
+        path.join(currentDirectory, destinationPath)
+      );
+      const decompressStream = createBrotliDecompress();
 
-    readStream.pipe(decompressStream).pipe(writeStream);
-
-    readStream.on("error", () => console.log("Operation failed."));
-    writeStream.on("error", () => console.log("Operation failed."));
+      await pipeline(readStream, decompressStream, writeStream);
+    } catch (err) {
+      console.log("Operation failed.");
+    }
   },
 };
 
 // Process user input
 const processUserInput = async (input) => {
-  const [operation, ...params] = input.split(" ");
+  const [command, ...params] = input.split(" ");
   try {
-    await operations[operation](...params);
+    await commands[command](...params);
   } catch (err) {
     console.log("Invalid input");
-    console.log(err)
   } finally {
     pcd();
   }
-  //   if (operations.hasOwnProperty(operation)) {
-  //     operations[operation](...params);
-  //     pcd();
-  //   } else {
-  //     console.log('Invalid input.');
-  //   }
 };
 
 // Read user input from console
-process.stdin.on('data', (data) => {
+process.stdin.on("data", (data) => {
   const userInput = data.toString().trim();
-  if (userInput === '.exit') {
+  if (userInput === ".exit") {
     console.log(`Thank you for using File Manager, ${username}, goodbye!`);
     process.exit();
   } else {
